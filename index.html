@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Julefilm Leaderboard</title>
+    <title>HR&IT's yndlings julefilm 2025</title>
     <!-- Font Awesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Google Fonts: Playfair Display (Serif) & Lato (Sans) -->
@@ -74,7 +74,8 @@
                 const existing = snapshot.docs.find(d => d.data().normalizedTitle === normalizedTitle);
 
                 if (existing) {
-                    showNotification(`'${rawTitle}' er allerede på listen!`, "warning");
+                    // Feedback til brugeren hvis filmen allerede findes
+                    showNotification(`Stop en halv! '${rawTitle}' er allerede på listen.`, "warning");
                     titleInput.value = '';
                     return;
                 }
@@ -344,10 +345,11 @@
 
         h1 {
             font-family: var(--font-serif);
-            font-size: 3.5rem;
+            font-size: 2.8rem;
             color: var(--color-gold);
             text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
             margin-bottom: 0.5rem;
+            line-height: 1.2;
         }
 
         .subtitle {
@@ -546,7 +548,7 @@
 
         /* --- MOBILE RESPONSIVE --- */
         @media (max-width: 600px) {
-            h1 { font-size: 2.5rem; }
+            h1 { font-size: 2.2rem; }
             .movie-card {
                 grid-template-columns: 1fr;
                 text-align: center;
@@ -573,7 +575,7 @@
 
     <main>
         <header>
-            <h1>Julefilm Favoritter</h1>
+            <h1>HR&IT's yndlings julefilm 2025</h1>
             <p class="subtitle">Nominer og stem på årets bedste julefilm</p>
         </header>
 
