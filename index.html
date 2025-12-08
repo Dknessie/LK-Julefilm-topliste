@@ -16,18 +16,25 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 
         // --- KONFIGURATION START ---
-        // I et rigtigt miljø ville dette ligge i en .env fil eller config.js
-        // Systemet her injicerer konfigurationen automatisk.
-        const firebaseConfig = JSON.parse(__firebase_config);
+        // PRODUKTIONS-SETUP
+        const firebaseConfig = {
+          apiKey: "AIzaSyCuqnkKBL5o7m5_vNW4i_RxLtZqean-ssw",
+          authDomain: "lk-julefilm.firebaseapp.com",
+          projectId: "lk-julefilm",
+          storageBucket: "lk-julefilm.firebasestorage.app",
+          messagingSenderId: "904153438872",
+          appId: "1:904153438872:web:319af267cef74f99b6ceed"
+        };
+        
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
-        const appId = __app_id || 'default-app'; // Bruges til at isolere data i dette miljø
         
-        // REGLER FOR FIRESTORE PATH (System specific):
-        // Vi bruger /artifacts/{appId}/public/data/movies for at overholde sikkerhedsreglerne
+        // REGLER FOR FIRESTORE PATH (PRODUKTION):
+        // Vi skriver nu direkte til roden.
+        // HUSK: Dine Firestore Rules skal tillade skrivning til: match /movies/{movie}
         const COLLECTION_NAME = 'movies'; 
-        const moviesCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME);
+        const moviesCollectionRef = collection(db, COLLECTION_NAME);
 
         // --- STATE MANAGEMENT ---
         let currentUser = null;
@@ -36,17 +43,10 @@
         // Vi logger ind anonymt med det samme. Uden auth, ingen database adgang.
         async function initAuth() {
             try {
-                // Vi forsøger først custom token hvis tilgængeligt (system specifik), ellers anonymt
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                     // Dette step springes ofte over i simpel kode, men er kritisk her
-                     // Vi antager anonymt login for simpelhedens skyld i koden, men systemet håndterer det bagved.
-                     await signInAnonymously(auth);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                await signInAnonymously(auth);
             } catch (error) {
                 console.error("Auth Error:", error);
-                showNotification("Kunne ikke logge ind. Tjek konsollen.", "error");
+                showNotification("Kunne ikke logge ind. Tjek konsollen (F12).", "error");
             }
         }
 
@@ -96,7 +96,7 @@
                 titleInput.value = '';
             } catch (error) {
                 console.error("Error adding movie: ", error);
-                showNotification("Fejl ved tilføjelse af film.", "error");
+                showNotification("Fejl ved tilføjelse af film. Tjek rettigheder.", "error");
             }
         });
 
@@ -104,7 +104,7 @@
         window.handleRate = async (movieId, rating) => {
             if (!currentUser) return;
 
-            const movieRef = doc(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME, movieId);
+            const movieRef = doc(db, COLLECTION_NAME, movieId);
 
             try {
                 // Atomisk opdatering for at sikre dataintegritet ved samtidige stemmer
@@ -211,7 +211,8 @@
                     renderLeaderboard(snapshot.docs);
                 }, (error) => {
                     console.error("Firestore Error:", error);
-                    loadingIndicator.textContent = "Fejl ved indlæsning af data.";
+                    // Hvis dette sker nu, er det 99% sikkert pga. manglende Security Rules eller forkert API key
+                    loadingIndicator.textContent = "Kunne ikke hente data. Tjek konsol for 'Permission Denied'.";
                 });
             } else {
                 initAuth();
