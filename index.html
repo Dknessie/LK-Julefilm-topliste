@@ -12,7 +12,7 @@
     <!-- Firebase SDK Imports (Module) -->
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js';
-        import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot, query, orderBy, increment, getDocs, where } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
+        import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot, query, orderBy, increment, getDocs, where, runTransaction, getDoc } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
         import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 
         // --- KONFIGURATION START ---
@@ -30,23 +30,21 @@
         const db = getFirestore(app);
         const auth = getAuth(app);
         
-        // REGLER FOR FIRESTORE PATH (PRODUKTION):
-        // Vi skriver nu direkte til roden.
-        // HUSK: Dine Firestore Rules skal tillade skrivning til: match /movies/{movie}
         const COLLECTION_NAME = 'movies'; 
         const moviesCollectionRef = collection(db, COLLECTION_NAME);
 
         // --- STATE MANAGEMENT ---
         let currentUser = null;
+        // Vi gemmer stemte film-ID'er lokalt for hurtig UI opdatering
+        let localVotedMovies = new Set(JSON.parse(localStorage.getItem('votedMovies') || '[]'));
 
         // --- AUTHENTICATION ---
-        // Vi logger ind anonymt med det samme. Uden auth, ingen database adgang.
         async function initAuth() {
             try {
                 await signInAnonymously(auth);
             } catch (error) {
                 console.error("Auth Error:", error);
-                showNotification("Kunne ikke logge ind. Tjek konsollen (F12).", "error");
+                showNotification("Kunne ikke logge ind. Tjek konsollen.", "error");
             }
         }
 
@@ -59,7 +57,7 @@
         movieForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!currentUser) {
-                showNotification("Venter på forbindelse til server...", "error");
+                showNotification("Venter på forbindelse...", "error");
                 return;
             }
 
@@ -71,19 +69,16 @@
             const normalizedTitle = rawTitle.toLowerCase();
 
             try {
-                // 1. Tjek om filmen findes (Validering)
-                // Bemærk: Vi henter alle og filtrerer i hukommelsen for at undgå komplekse indekseringsfejl
-                // i dette simple preview miljø. I prod ville man bruge: where("normalizedTitle", "==", normalizedTitle)
+                // Validering: Tjek om filmen findes
                 const snapshot = await getDocs(moviesCollectionRef);
                 const existing = snapshot.docs.find(d => d.data().normalizedTitle === normalizedTitle);
 
                 if (existing) {
-                    showNotification(`'${rawTitle}' er allerede på listen! Stem på den nedenfor.`, "warning");
+                    showNotification(`'${rawTitle}' er allerede på listen!`, "warning");
                     titleInput.value = '';
                     return;
                 }
 
-                // 2. Opret filmen
                 await addDoc(moviesCollectionRef, {
                     title: rawTitle,
                     normalizedTitle: normalizedTitle,
@@ -96,28 +91,78 @@
                 titleInput.value = '';
             } catch (error) {
                 console.error("Error adding movie: ", error);
-                showNotification("Fejl ved tilføjelse af film. Tjek rettigheder.", "error");
+                showNotification("Fejl ved tilføjelse. Tjek rettigheder.", "error");
             }
         });
 
-        // --- LOGIK: RATING SYSTEM ---
+        // --- LOGIK: SIKKER RATING (TRANSACTION) ---
         window.handleRate = async (movieId, rating) => {
             if (!currentUser) return;
 
+            // Optimistisk UI check: Hvis vi ved lokalt at de har stemt, stop dem her.
+            if (localVotedMovies.has(movieId)) {
+                showNotification("Du har allerede stemt på denne film!", "warning");
+                return;
+            }
+
             const movieRef = doc(db, COLLECTION_NAME, movieId);
+            // Vi laver en unik sti for hver brugers stemme på hver film
+            // Path: movies/{movieId}/votes/{userId}
+            const userVoteRef = doc(db, COLLECTION_NAME, movieId, 'votes', currentUser.uid);
 
             try {
-                // Atomisk opdatering for at sikre dataintegritet ved samtidige stemmer
-                await updateDoc(movieRef, {
-                    voteCount: increment(1),
-                    totalScore: increment(rating)
+                // Kør en transaktion: Alt eller intet.
+                await runTransaction(db, async (transaction) => {
+                    // 1. Læs: Har denne bruger allerede stemt i databasen?
+                    const voteDoc = await transaction.get(userVoteRef);
+                    if (voteDoc.exists()) {
+                        throw "Allerede stemt"; // Afbryd transaktion
+                    }
+
+                    // 2. Skriv: Registrer stemmen
+                    transaction.set(userVoteRef, {
+                        rating: rating,
+                        timestamp: new Date().toISOString(),
+                        user: currentUser.uid
+                    });
+
+                    // 3. Opdater: Inkrementer tællerne på filmen
+                    transaction.update(movieRef, {
+                        voteCount: increment(1),
+                        totalScore: increment(rating)
+                    });
                 });
+
+                // Opdater lokal state
+                localVotedMovies.add(movieId);
+                localStorage.setItem('votedMovies', JSON.stringify([...localVotedMovies]));
+                
+                // Opdater UI manuelt for denne knap med det samme (frivilligt, men lækkert)
+                renderVotedState(movieId);
+
                 showNotification(`Tak for din stemme! (${rating} ❄️)`, "success");
+
             } catch (error) {
-                console.error("Error rating movie:", error);
-                showNotification("Kunne ikke registrere din stemme.", "error");
+                console.error("Transaction failed: ", error);
+                if (error === "Allerede stemt") {
+                    showNotification("Du har allerede afgivet din stemme.", "warning");
+                    // Synkroniser lokal state hvis den var forkert
+                    localVotedMovies.add(movieId);
+                    localStorage.setItem('votedMovies', JSON.stringify([...localVotedMovies]));
+                    renderVotedState(movieId);
+                } else {
+                    showNotification("Kunne ikke registrere stemme. Prøv igen.", "error");
+                }
             }
         };
+
+        // Hjælper til at låse knapper visuelt
+        function renderVotedState(movieId) {
+            const container = document.getElementById(`actions-${movieId}`);
+            if (container) {
+                container.innerHTML = '<span class="voted-badge"><i class="fas fa-check"></i> Stemt</span>';
+            }
+        }
 
         // --- LOGIK: UI RENDERING ---
         function renderLeaderboard(docs) {
@@ -128,14 +173,13 @@
                 return;
             }
 
-            // Client-side sortering for at beregne gennemsnit korrekt
             const movies = docs.map(doc => {
                 const data = doc.data();
                 const avg = data.voteCount > 0 ? (data.totalScore / data.voteCount) : 0;
                 return { id: doc.id, ...data, average: avg };
             });
 
-            // Sorter efter gennemsnit (højest først), derefter antal stemmer
+            // Sorter efter gennemsnit
             movies.sort((a, b) => {
                 if (b.average !== a.average) return b.average - a.average;
                 return b.voteCount - a.voteCount;
@@ -144,7 +188,6 @@
             movies.forEach((movie, index) => {
                 const card = document.createElement('div');
                 card.className = 'movie-card glass-panel';
-                // Animation delay for lækker effekt
                 card.style.animationDelay = `${index * 0.1}s`;
 
                 const rank = index + 1;
@@ -152,6 +195,25 @@
                 if (rank === 1) rankClass = 'rank-gold';
                 if (rank === 2) rankClass = 'rank-silver';
                 if (rank === 3) rankClass = 'rank-bronze';
+
+                // Tjek om brugeren har stemt (lokalt tjek for UI performance)
+                const hasVoted = localVotedMovies.has(movie.id);
+
+                let actionsHtml = '';
+                if (hasVoted) {
+                    actionsHtml = '<span class="voted-badge"><i class="fas fa-check"></i> Stemt</span>';
+                } else {
+                    actionsHtml = `
+                        <p class="vote-label">Din vurdering:</p>
+                        <div class="rating-buttons">
+                            ${[1, 2, 3, 4, 5].map(num => `
+                                <button onclick="window.handleRate('${movie.id}', ${num})" aria-label="Giv ${num} stjerner">
+                                    <i class="far fa-snowflake"></i>
+                                </button>
+                            `).join('')}
+                        </div>
+                    `;
+                }
 
                 card.innerHTML = `
                     <div class="movie-rank ${rankClass}">#${rank}</div>
@@ -162,22 +224,14 @@
                             <span class="votes">(${movie.voteCount} stemmer)</span>
                         </div>
                     </div>
-                    <div class="vote-actions">
-                        <p class="vote-label">Din vurdering:</p>
-                        <div class="rating-buttons">
-                            ${[1, 2, 3, 4, 5].map(num => `
-                                <button onclick="window.handleRate('${movie.id}', ${num})" aria-label="Giv ${num} stjerner">
-                                    <i class="far fa-snowflake"></i>
-                                </button>
-                            `).join('')}
-                        </div>
+                    <div class="vote-actions" id="actions-${movie.id}">
+                        ${actionsHtml}
                     </div>
                 `;
                 leaderboardList.appendChild(card);
             });
         }
 
-        // Hjælpefunktion til at undgå XSS
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -189,11 +243,8 @@
             notif.className = `notification ${type}`;
             notif.textContent = message;
             document.body.appendChild(notif);
-            
-            // Trigger reflow
             notif.offsetHeight; 
             notif.classList.add('show');
-
             setTimeout(() => {
                 notif.classList.remove('show');
                 setTimeout(() => notif.remove(), 300);
@@ -204,15 +255,13 @@
         onAuthStateChanged(auth, (user) => {
             if (user) {
                 currentUser = user;
-                // Start real-time listener
-                // Vi bruger onSnapshot for at få opdateringer live, når kollegaerne stemmer
+                // Live listener
                 onSnapshot(moviesCollectionRef, (snapshot) => {
                     loadingIndicator.style.display = 'none';
                     renderLeaderboard(snapshot.docs);
                 }, (error) => {
                     console.error("Firestore Error:", error);
-                    // Hvis dette sker nu, er det 99% sikkert pga. manglende Security Rules eller forkert API key
-                    loadingIndicator.textContent = "Kunne ikke hente data. Tjek konsol for 'Permission Denied'.";
+                    loadingIndicator.textContent = "Kunne ikke hente data.";
                 });
             } else {
                 initAuth();
@@ -241,7 +290,6 @@
         body {
             font-family: var(--font-sans);
             background-color: var(--color-red);
-            /* Subtil gradient baggrund */
             background-image: linear-gradient(135deg, #500000 0%, #8b0000 100%);
             color: var(--color-white);
             min-height: 100vh;
@@ -271,7 +319,6 @@
             100% { transform: translateY(110vh) translateX(20px) rotate(360deg); opacity: 0.3; }
         }
 
-        /* Generer forskellige hastigheder og størrelser via nth-child */
         .snowflake:nth-child(1) { left: 10%; animation-duration: 10s; font-size: 1.2em; }
         .snowflake:nth-child(2) { left: 20%; animation-duration: 12s; font-size: 0.8em; animation-delay: 2s; }
         .snowflake:nth-child(3) { left: 35%; animation-duration: 8s; font-size: 1.5em; animation-delay: 1s; }
@@ -374,7 +421,7 @@
             gap: 1rem;
             padding: 1rem 1.5rem;
             animation: slideIn 0.5s ease-out forwards;
-            opacity: 0; /* Start hidden for animation */
+            opacity: 0; 
         }
 
         @keyframes slideIn {
@@ -420,6 +467,7 @@
             display: flex;
             flex-direction: column;
             align-items: flex-end;
+            min-width: 140px;
         }
 
         .vote-label {
@@ -454,6 +502,16 @@
             color: var(--color-red);
             border-color: var(--color-white);
             transform: scale(1.2);
+        }
+
+        .voted-badge {
+            color: var(--color-gold);
+            font-weight: bold;
+            border: 1px solid var(--color-gold);
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            background: rgba(255, 215, 0, 0.1);
         }
 
         /* --- NOTIFICATIONS --- */
@@ -496,7 +554,7 @@
             }
             .movie-rank { margin: 0 auto; }
             .movie-stats { justify-content: center; }
-            .vote-actions { align-items: center; text-align: center; }
+            .vote-actions { align-items: center; text-align: center; min-width: auto; }
         }
     </style>
 </head>
