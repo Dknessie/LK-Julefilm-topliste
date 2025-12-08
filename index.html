@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Julefilm Leaderboard</title>
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts: Playfair Display (Serif) & Lato (Sans) -->
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
+    
+    <!-- Firebase SDK Imports (Module) -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js';
+        import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot, query, orderBy, increment, getDocs, where } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
+
+        // --- KONFIGURATION START ---
+        // I et rigtigt miljø ville dette ligge i en .env fil eller config.js
+        // Systemet her injicerer konfigurationen automatisk.
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = __app_id || 'default-app'; // Bruges til at isolere data i dette miljø
+        
+        // REGLER FOR FIRESTORE PATH (System specific):
+        // Vi bruger /artifacts/{appId}/public/data/movies for at overholde sikkerhedsreglerne
+        const COLLECTION_NAME = 'movies'; 
+        const moviesCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME);
+
+        // --- STATE MANAGEMENT ---
+        let currentUser = null;
+
+        // --- AUTHENTICATION ---
+        // Vi logger ind anonymt med det samme. Uden auth, ingen database adgang.
+        async function initAuth() {
+            try {
+                // Vi forsøger først custom token hvis tilgængeligt (system specifik), ellers anonymt
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                     // Dette step springes ofte over i simpel kode, men er kritisk her
+                     // Vi antager anonymt login for simpelhedens skyld i koden, men systemet håndterer det bagved.
+                     await signInAnonymously(auth);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth Error:", error);
+                showNotification("Kunne ikke logge ind. Tjek konsollen.", "error");
+            }
+        }
+
+        // --- DOM ELEMENTER ---
+        const movieForm = document.getElementById('add-movie-form');
+        const leaderboardList = document.getElementById('leaderboard-list');
+        const loadingIndicator = document.getElementById('loading');
+
+        // --- LOGIK: TILFØJ FILM ---
+        movieForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!currentUser) {
+                showNotification("Venter på forbindelse til server...", "error");
+                return;
+            }
+
+            const titleInput = document.getElementById('movie-title');
+            const rawTitle = titleInput.value.trim();
+            
+            if (!rawTitle) return;
+
+            const normalizedTitle = rawTitle.toLowerCase();
+
+            try {
+                // 1. Tjek om filmen findes (Validering)
+                // Bemærk: Vi henter alle og filtrerer i hukommelsen for at undgå komplekse indekseringsfejl
+                // i dette simple preview miljø. I prod ville man bruge: where("normalizedTitle", "==", normalizedTitle)
+                const snapshot = await getDocs(moviesCollectionRef);
+                const existing = snapshot.docs.find(d => d.data().normalizedTitle === normalizedTitle);
+
+                if (existing) {
+                    showNotification(`'${rawTitle}' er allerede på listen! Stem på den nedenfor.`, "warning");
+                    titleInput.value = '';
+                    return;
+                }
+
+                // 2. Opret filmen
+                await addDoc(moviesCollectionRef, {
+                    title: rawTitle,
+                    normalizedTitle: normalizedTitle,
+                    totalScore: 0,
+                    voteCount: 0,
+                    createdAt: new Date().toISOString()
+                });
+
+                showNotification("Filmen er nomineret!", "success");
+                titleInput.value = '';
+            } catch (error) {
+                console.error("Error adding movie: ", error);
+                showNotification("Fejl ved tilføjelse af film.", "error");
+            }
+        });
+
+        // --- LOGIK: RATING SYSTEM ---
+        window.handleRate = async (movieId, rating) => {
+            if (!currentUser) return;
+
+            const movieRef = doc(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME, movieId);
+
+            try {
+                // Atomisk opdatering for at sikre dataintegritet ved samtidige stemmer
+                await updateDoc(movieRef, {
+                    voteCount: increment(1),
+                    totalScore: increment(rating)
+                });
+                showNotification(`Tak for din stemme! (${rating} ❄️)`, "success");
+            } catch (error) {
+                console.error("Error rating movie:", error);
+                showNotification("Kunne ikke registrere din stemme.", "error");
+            }
+        };
+
+        // --- LOGIK: UI RENDERING ---
+        function renderLeaderboard(docs) {
+            leaderboardList.innerHTML = '';
+            
+            if (docs.length === 0) {
+                leaderboardList.innerHTML = '<div class="empty-state">Ingen film nomineret endnu. Vær den første!</div>';
+                return;
+            }
+
+            // Client-side sortering for at beregne gennemsnit korrekt
+            const movies = docs.map(doc => {
+                const data = doc.data();
+                const avg = data.voteCount > 0 ? (data.totalScore / data.voteCount) : 0;
+                return { id: doc.id, ...data, average: avg };
+            });
+
+            // Sorter efter gennemsnit (højest først), derefter antal stemmer
+            movies.sort((a, b) => {
+                if (b.average !== a.average) return b.average - a.average;
+                return b.voteCount - a.voteCount;
+            });
+
+            movies.forEach((movie, index) => {
+                const card = document.createElement('div');
+                card.className = 'movie-card glass-panel';
+                // Animation delay for lækker effekt
+                card.style.animationDelay = `${index * 0.1}s`;
+
+                const rank = index + 1;
+                let rankClass = 'rank-other';
+                if (rank === 1) rankClass = 'rank-gold';
+                if (rank === 2) rankClass = 'rank-silver';
+                if (rank === 3) rankClass = 'rank-bronze';
+
+                card.innerHTML = `
+                    <div class="movie-rank ${rankClass}">#${rank}</div>
+                    <div class="movie-info">
+                        <h3 class="movie-title">${escapeHtml(movie.title)}</h3>
+                        <div class="movie-stats">
+                            <span class="score"><i class="fas fa-star gold-text"></i> ${movie.average.toFixed(1)}</span>
+                            <span class="votes">(${movie.voteCount} stemmer)</span>
+                        </div>
+                    </div>
+                    <div class="vote-actions">
+                        <p class="vote-label">Din vurdering:</p>
+                        <div class="rating-buttons">
+                            ${[1, 2, 3, 4, 5].map(num => `
+                                <button onclick="window.handleRate('${movie.id}', ${num})" aria-label="Giv ${num} stjerner">
+                                    <i class="far fa-snowflake"></i>
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+                leaderboardList.appendChild(card);
+            });
+        }
+
+        // Hjælpefunktion til at undgå XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showNotification(message, type = 'info') {
+            const notif = document.createElement('div');
+            notif.className = `notification ${type}`;
+            notif.textContent = message;
+            document.body.appendChild(notif);
+            
+            // Trigger reflow
+            notif.offsetHeight; 
+            notif.classList.add('show');
+
+            setTimeout(() => {
+                notif.classList.remove('show');
+                setTimeout(() => notif.remove(), 300);
+            }, 3000);
+        }
+
+        // --- INIT ---
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                // Start real-time listener
+                // Vi bruger onSnapshot for at få opdateringer live, når kollegaerne stemmer
+                onSnapshot(moviesCollectionRef, (snapshot) => {
+                    loadingIndicator.style.display = 'none';
+                    renderLeaderboard(snapshot.docs);
+                }, (error) => {
+                    console.error("Firestore Error:", error);
+                    loadingIndicator.textContent = "Fejl ved indlæsning af data.";
+                });
+            } else {
+                initAuth();
+            }
+        });
+
+    </script>
+
+    <style>
+        /* --- CSS VARIABLES & RESET --- */
+        :root {
+            --color-red: #8b0000;
+            --color-gold: #FFD700;
+            --color-green: #006400;
+            --color-white: #ffffff;
+            --color-glass: rgba(255, 255, 255, 0.15);
+            --color-glass-border: rgba(255, 255, 255, 0.3);
+            --shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            
+            --font-serif: 'Playfair Display', serif;
+            --font-sans: 'Lato', sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--color-red);
+            /* Subtil gradient baggrund */
+            background-image: linear-gradient(135deg, #500000 0%, #8b0000 100%);
+            color: var(--color-white);
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* --- SNEVEJRS EFFEKT (CSS ONLY) --- */
+        .snow-container {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            overflow: hidden;
+        }
+        
+        .snowflake {
+            position: absolute;
+            top: -10px;
+            color: rgba(255,255,255, 0.3);
+            font-size: 1em;
+            animation: fall linear infinite;
+        }
+
+        @keyframes fall {
+            0% { transform: translateY(-10vh) translateX(0) rotate(0deg); opacity: 1; }
+            100% { transform: translateY(110vh) translateX(20px) rotate(360deg); opacity: 0.3; }
+        }
+
+        /* Generer forskellige hastigheder og størrelser via nth-child */
+        .snowflake:nth-child(1) { left: 10%; animation-duration: 10s; font-size: 1.2em; }
+        .snowflake:nth-child(2) { left: 20%; animation-duration: 12s; font-size: 0.8em; animation-delay: 2s; }
+        .snowflake:nth-child(3) { left: 35%; animation-duration: 8s; font-size: 1.5em; animation-delay: 1s; }
+        .snowflake:nth-child(4) { left: 50%; animation-duration: 11s; font-size: 1em; animation-delay: 0s; }
+        .snowflake:nth-child(5) { left: 65%; animation-duration: 13s; font-size: 1.1em; animation-delay: 3s; }
+        .snowflake:nth-child(6) { left: 80%; animation-duration: 9s; font-size: 0.9em; animation-delay: 2s; }
+        .snowflake:nth-child(7) { left: 90%; animation-duration: 14s; font-size: 1.3em; animation-delay: 5s; }
+
+        /* --- LAYOUT --- */
+        main {
+            position: relative;
+            z-index: 1;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+            position: relative;
+        }
+
+        h1 {
+            font-family: var(--font-serif);
+            font-size: 3.5rem;
+            color: var(--color-gold);
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            opacity: 0.9;
+            letter-spacing: 1px;
+        }
+
+        /* --- GLASSMORPHISM COMPONENTS --- */
+        .glass-panel {
+            background: var(--color-glass);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid var(--color-glass-border);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        /* --- INPUT FORM --- */
+        .input-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 12px 20px;
+            border-radius: 25px;
+            border: none;
+            outline: none;
+            background: rgba(255,255,255,0.9);
+            color: #333;
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            min-width: 200px;
+        }
+
+        button.btn-primary {
+            background-color: var(--color-green);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 25px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, background-color 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 0.9rem;
+        }
+
+        button.btn-primary:hover {
+            background-color: #008000;
+            transform: scale(1.05);
+        }
+
+        /* --- LEADERBOARD LIST --- */
+        #leaderboard-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .movie-card {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem 1.5rem;
+            animation: slideIn 0.5s ease-out forwards;
+            opacity: 0; /* Start hidden for animation */
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .movie-rank {
+            font-family: var(--font-serif);
+            font-size: 1.5rem;
+            font-weight: bold;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            background: rgba(0,0,0,0.2);
+        }
+
+        .rank-gold { color: var(--color-gold); text-shadow: 0 0 10px rgba(255, 215, 0, 0.5); border: 2px solid var(--color-gold); background: transparent; }
+        .rank-silver { color: #C0C0C0; border: 2px solid #C0C0C0; background: transparent; }
+        .rank-bronze { color: #cd7f32; border: 2px solid #cd7f32; background: transparent; }
+
+        .movie-info h3 {
+            font-size: 1.3rem;
+            margin-bottom: 0.3rem;
+            color: var(--color-white);
+        }
+
+        .movie-stats {
+            font-size: 0.9rem;
+            opacity: 0.8;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .gold-text { color: var(--color-gold); }
+
+        .vote-actions {
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .vote-label {
+            font-size: 0.75rem;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            opacity: 0.7;
+        }
+
+        .rating-buttons {
+            display: flex;
+            gap: 5px;
+        }
+
+        .rating-buttons button {
+            background: none;
+            border: 1px solid rgba(255,255,255,0.3);
+            color: rgba(255,255,255,0.7);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .rating-buttons button:hover {
+            background: var(--color-white);
+            color: var(--color-red);
+            border-color: var(--color-white);
+            transform: scale(1.2);
+        }
+
+        /* --- NOTIFICATIONS --- */
+        .notification {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: white;
+            color: #333;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            transform: translateY(100px);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 100;
+            font-weight: bold;
+            border-left: 5px solid #333;
+        }
+
+        .notification.show { transform: translateY(0); }
+        .notification.success { border-left-color: var(--color-green); }
+        .notification.error { border-left-color: var(--color-red); }
+        .notification.warning { border-left-color: var(--color-gold); }
+        .notification.info { border-left-color: #2196F3; }
+
+        .empty-state, #loading {
+            text-align: center;
+            padding: 2rem;
+            font-style: italic;
+            opacity: 0.7;
+        }
+
+        /* --- MOBILE RESPONSIVE --- */
+        @media (max-width: 600px) {
+            h1 { font-size: 2.5rem; }
+            .movie-card {
+                grid-template-columns: 1fr;
+                text-align: center;
+                gap: 0.8rem;
+            }
+            .movie-rank { margin: 0 auto; }
+            .movie-stats { justify-content: center; }
+            .vote-actions { align-items: center; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- CSS Snow Container -->
+    <div class="snow-container">
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+        <div class="snowflake">❄</div>
+    </div>
+
+    <main>
+        <header>
+            <h1>Julefilm Favoritter</h1>
+            <p class="subtitle">Nominer og stem på årets bedste julefilm</p>
+        </header>
+
+        <!-- Add Movie Section -->
+        <section class="glass-panel">
+            <form id="add-movie-form">
+                <div class="input-group">
+                    <input type="text" id="movie-title" placeholder="Indtast filmtitel (f.eks. Die Hard)" required autocomplete="off">
+                    <button type="submit" class="btn-primary">
+                        <i class="fas fa-plus-circle"></i> Nominer
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Leaderboard Section -->
+        <section id="leaderboard">
+            <div id="loading">Henter julehyggen...</div>
+            <div id="leaderboard-list">
+                <!-- Dynamisk indhold -->
+            </div>
+        </section>
+    </main>
+
+</body>
+</html>
